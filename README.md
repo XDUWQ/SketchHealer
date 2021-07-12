@@ -10,6 +10,9 @@
     -   pillow
     -   and some common dependency libraries.
 
+## Dataset
+download from https://github.com/googlecreativelab/quickdraw-dataset
+
 ## Training
 
 -   modify your data location and categories in hyper_params.py
