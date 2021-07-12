@@ -152,7 +152,10 @@ def make_image(sequence, epoch, name='_output_'):
     pil_image = PIL.Image.frombytes('RGB', canvas.get_width_height(),
                                     canvas.tostring_rgb())
     name = f"./model_save/" + str(epoch) + name + '.jpg'
-    pil_image.save(name, "JPEG")
+    try:
+        pil_image.save(name, "JPEG")
+    except Exception as e:
+        print("pil_image_save save error", e)
     plt.close("all")
 
 
