@@ -3,6 +3,7 @@ import os
 from hyper_params import hp
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 import PIL
 
 import torch
@@ -10,7 +11,28 @@ import torch.nn as nn
 from torch import optim
 from encoder import EncoderGCN
 from decoder import DecoderRNN
+from utils.misc import *
 from utils.sketch_processing import make_graph
+
+# Arguments
+parser = argparse.ArgumentParser()
+# Model arguments
+
+# Training
+parser.add_argument('--logging', type=eval, default=True, choices=[True, False])
+parser.add_argument('--log_root', type=str, default='./logs_gcn')
+
+# logging
+if args.logging:
+    log_dir = get_new_log_dir(args.log_root, prefix='GCN_', postfix='_' + args.tag if args.tag is not None else '')
+    writer = torch.utils.tensorboard.SummaryWriter(log_dir)
+    ckpt_mgr = CheckpointManager(log_dir)
+    log_hyperparams(writer, args)
+else:
+    logger = get_logger('train', None)
+    writer = BlackHole()
+    ckpt_mgr = BlackHole()
+logger.info(args)
 
 
 ################################# load and prepare data
@@ -152,10 +174,12 @@ def make_image(sequence, epoch, name='_output_'):
     pil_image = PIL.Image.frombytes('RGB', canvas.get_width_height(),
                                     canvas.tostring_rgb())
     name = f"./model_save/" + str(epoch) + name + '.jpg'
+    print("pil_image_save name by wangqiang", name)
     try:
         pil_image.save(name, "JPEG")
     except Exception as e:
         print("pil_image_save save error", e)
+    
     plt.close("all")
 
 
@@ -273,6 +297,10 @@ class Model:
         z_y = ((dy - self.mu_y) / self.sigma_y) ** 2
         z_xy = (dx - self.mu_x) * (dy - self.mu_y) / (self.sigma_x * self.sigma_y)
         z = z_x + z_y - 2 * self.rho_xy * z_xy
+        logger.info("--------------z size--------------")
+        logger.info(list(z.out()))
+        logger.info("--------------z sample----------------")
+        logger.info(z)
         exp = torch.exp(-z / (2 * (1 - self.rho_xy ** 2)))
         norm = 2 * np.pi * self.sigma_x * self.sigma_y * torch.sqrt(1 - self.rho_xy ** 2)
         return exp / norm
