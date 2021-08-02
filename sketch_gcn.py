@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import PIL
+import random
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,9 @@ from encoder import EncoderGCN
 from decoder import DecoderRNN
 from utils.misc import *
 from utils.sketch_processing import make_graph
+from neuralline.rasterize import Raster
+import lpips
+from torch.autograd import Variable
 
 # Arguments
 parser = argparse.ArgumentParser()
@@ -123,8 +127,14 @@ class SketchesDataset:
             index += 1
 
         for _each_sketch in batch_sketches_graphs:
-            _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
-                                                    graph_picture_size=hp.graph_picture_size, mask_prob=hp.mask_prob)
+            if (random.randint(0,1) == 0):
+                _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
+                                                    graph_picture_size=hp.graph_picture_size, mask_prob=0.1)
+            else:
+                _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
+                                                    graph_picture_size=hp.graph_picture_size, mask_prob=0.3)
+            # _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
+            #                                         graph_picture_size=hp.graph_picture_size, mask_prob=hp.mask_prob)
             graphs.append(_graph_tensor)
             adjs.append(_adj_matrix)
 
@@ -143,7 +153,6 @@ class SketchesDataset:
 
 sketch_dataset = SketchesDataset(hp.data_location, hp.category, "train")
 hp.Nmax = sketch_dataset.Nmax
-
 
 def sample_bivariate_normal(mu_x: torch.Tensor, mu_y: torch.Tensor,
                             sigma_x: torch.Tensor, sigma_y: torch.Tensor,
@@ -178,7 +187,7 @@ def make_image(sequence, epoch, name='_output_'):
     pil_image = PIL.Image.frombytes('RGB', canvas.get_width_height(),
                                     canvas.tostring_rgb())
     name = f"./model_save/" + str(epoch) + name + '.jpg'
-    print("pil_image_save name by wangqiang", name)
+    # print("pil_image_save name by wangqiang", name)
     try:
         pil_image.save(name, "JPEG")
     except Exception as e:
@@ -234,13 +243,27 @@ class Model:
         p3 = batch.data[:, :, 4]
         p = torch.stack([p1, p2, p3], 2)  # torch.Size([130, 100, 3])
         return mask, dx, dy, p
+    
+    def make_target_quintet(self, batch):
+        '''return five truples by wangqiang'''
+        if hp.use_cuda:
+            eos = torch.stack([torch.Tensor([0, 0, 0, 0, 1])] * batch.size()[1]).cuda().unsqueeze(0)  # torch.Size([1, 100, 5])
+        else:
+            eos = torch.stack([torch.Tensor([0, 0, 0, 0, 1])] * batch.size()[1]).unsqueeze(0)  # max of len(strokes)
+
+        batch = torch.cat([batch, eos], 0)
+        dx = torch.stack([batch.data[:, :, 0]] * hp.M, 2)  # torch.Size([130, 100, 20])
+        dy = torch.stack([batch.data[:, :, 1]] * hp.M, 2)  # torch.Size([130, 100, 20])
+        p1 = batch.data[:, :, 2]  # torch.Size([130, 100])
+        p2 = batch.data[:, :, 3]
+        p3 = batch.data[:, :, 4]
+        return dx, dy, p1, p2, p3    
 
     def train(self, epoch):
         self.encoder.train()
         self.decoder.train()
         batch, lengths, graphs, adjs = sketch_dataset.make_batch(hp.batch_size)
-        # print(batch, lengths)
-
+        # print(f"-----batch is {batch}, shape is {batch.shape}----------------")
         # encode:
         # z, self.mu, self.sigma = self.encoder(batch, hp.batch_size)  # in here, Z is sampled from N(mu, sigma)
         z, self.mu, self.sigma = self.encoder(graphs, adjs)  # in here, Z is sampled from N(mu, sigma)
@@ -262,9 +285,42 @@ class Model:
 
         # decode:
         self.pi, self.mu_x, self.mu_y, self.sigma_x, self.sigma_y, self.rho_xy, self.q, _, _ = self.decoder(inputs, z)
-
+        
         # prepare targets:
         mask, dx, dy, p = self.make_target(batch, lengths)
+        # five truples
+        #fx, fy, p1, p2, p3 = self.make_target_quintet(batch)
+        #print(f"fx is {fx}, fx size is {fx.shape}, fy is {fy}, fy size is {fy.shape}")
+        # raster of pref and ref
+        intensities = 1.0
+        imgsize = 244
+        thickness = 1.0
+        device = torch.device('cuda:{}'.format(0) if torch.cuda.is_available() else 'cpu')
+        x_y_ref = batch[1]
+        x_y_ref = x_y_ref[1]
+        #pref = torch.tensor([fx,fy,p1,p2,p3])
+        pref = torch.zeros(2,2)
+        x_pref, x_pref = conditional_generation_x_y()
+        ref = torch.zeros(2,2)
+        ref[0][0] = x_y_ref[0]
+        ref[1][1] = x_y_ref[1]
+        pref[0][0] = x_pref
+        pref[1][1] = y_pref
+        print(f"ref is {ref}, ref size is {ref.shape}")
+        print(f"pref is {pref}, pref size is {pref.shape}")
+        ref = Raster.to_image(ref, intensities, imgsize, thickness, device=device)        
+        pref = Raster.to_image(pref, intensities, imgsize, thickness, device=device)
+        pref = Variable(pref)
+        # perceptual loss
+        loss_fn = lpips.LPIPS(net='vgg')
+        loss_fn.cuda()
+        ref = ref.cuda()
+        pref = pref.cuda()
+        optimizer = torch.optim.Adam([pref,], lr=1e-3, betas=(0.9, 0.999))
+        dist = loss_fn.forward(pref, ref)
+        PL = dist.view(-1).data.cpu().numpy()[0]
+        print(f"epoch is {epoch}, perceptual loss: {PL}")
+
         # prepare optimizers:
         self.encoder_optimizer.zero_grad()
         self.decoder_optimizer.zero_grad()
@@ -291,7 +347,7 @@ class Model:
             self.decoder_optimizer = self.lr_decay(self.decoder_optimizer)
         if epoch == 0:
             return
-        if epoch % 500 == 0:
+        if epoch % 5 == 0:
             self.conditional_generation(epoch)
         if epoch % 1000 == 0:
             self.save(epoch)
@@ -301,10 +357,6 @@ class Model:
         z_y = ((dy - self.mu_y) / self.sigma_y) ** 2
         z_xy = (dx - self.mu_x) * (dy - self.mu_y) / (self.sigma_x * self.sigma_y)
         z = z_x + z_y - 2 * self.rho_xy * z_xy
-        logger.info("--------------z size--------------")
-        logger.info(list(z.out()))
-        logger.info("--------------z sample----------------")
-        logger.info(z)
         exp = torch.exp(-z / (2 * (1 - self.rho_xy ** 2)))
         norm = 2 * np.pi * self.sigma_x * self.sigma_y * torch.sqrt(1 - self.rho_xy ** 2)
         return exp / norm
@@ -338,6 +390,28 @@ class Model:
         saved_decoder = torch.load(decoder_name)
         self.encoder.load_state_dict(saved_encoder)
         self.decoder.load_state_dict(saved_decoder)
+    
+    def conditional_generation_x_y(self):
+        batch, lengths, graphs, adjs = sketch_dataset.make_batch(1)
+        # should remove dropouts:
+        self.encoder.train(False)
+        self.decoder.train(False)
+        # encode:
+        z, _, _ = self.encoder(graphs, adjs)
+        if hp.use_cuda:
+            sos = torch.Tensor([0, 0, 1, 0, 0]).view(1, 1, -1).cuda()
+        else:
+            sos = torch.Tensor([0, 0, 1, 0, 0]).view(1, 1, -1)
+        s = sos
+        hidden_cell = None
+        input = torch.cat([s, z.unsqueeze(0)], 2)  # start of stroke concatenate with z
+        # decode:
+        self.pi, self.mu_x, self.mu_y, self.sigma_x, self.sigma_y, \
+        self.rho_xy, self.q, hidden, cell = \
+            self.decoder(input, z, hidden_cell)
+        # sample from parameters:
+        s, dx, dy, pen_down, eos = self.sample_next_state()
+        return dx, dy
 
     def conditional_generation(self, epoch):
         batch, lengths, graphs, adjs = sketch_dataset.make_batch(1)
@@ -364,6 +438,7 @@ class Model:
             hidden_cell = (hidden, cell)
             # sample from parameters:
             s, dx, dy, pen_down, eos = self.sample_next_state()
+            print(f"--------dx is {dx}, dy is {dy}-------------")
             # ------
             seq_x.append(dx)
             seq_y.append(dy)
