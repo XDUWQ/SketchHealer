@@ -19,6 +19,8 @@ from neuralline.rasterize import Raster
 import lpips
 from torch.autograd import Variable
 
+torch.backends.cudnn.enabled=False
+
 # Arguments
 parser = argparse.ArgumentParser()
 # Model arguments
@@ -127,14 +129,16 @@ class SketchesDataset:
             index += 1
 
         for _each_sketch in batch_sketches_graphs:
+            '''
             if (random.randint(0,1) == 0):
                 _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
                                                     graph_picture_size=hp.graph_picture_size, mask_prob=0.1)
             else:
                 _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
                                                     graph_picture_size=hp.graph_picture_size, mask_prob=0.3)
-            # _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
-            #                                         graph_picture_size=hp.graph_picture_size, mask_prob=hp.mask_prob)
+            '''
+            _graph_tensor, _adj_matrix = make_graph(_each_sketch, graph_num=hp.graph_number,
+                                                     graph_picture_size=hp.graph_picture_size, mask_prob=hp.mask_prob)
             graphs.append(_graph_tensor)
             adjs.append(_adj_matrix)
 
@@ -288,10 +292,13 @@ class Model:
         
         # prepare targets:
         mask, dx, dy, p = self.make_target(batch, lengths)
+        
         # five truples
         #fx, fy, p1, p2, p3 = self.make_target_quintet(batch)
         #print(f"fx is {fx}, fx size is {fx.shape}, fy is {fy}, fy size is {fy.shape}")
+        
         # raster of pref and ref
+        # set raster 
         intensities = 1.0
         imgsize = 244
         thickness = 1.0
@@ -299,26 +306,21 @@ class Model:
         x_y_ref = batch[1]
         x_y_ref = x_y_ref[1]
         #pref = torch.tensor([fx,fy,p1,p2,p3])
-        pref = torch.zeros(2,2)
-        x_pref, x_pref = conditional_generation_x_y()
-        ref = torch.zeros(2,2)
+        pref = torch.zeros(1,4)
+        x_pref, y_pref = self.conditional_generation_x_y()
+        # make ref pref
+        ref = torch.zeros(1,4)
         ref[0][0] = x_y_ref[0]
-        ref[1][1] = x_y_ref[1]
+        ref[0][1] = x_y_ref[1]
         pref[0][0] = x_pref
-        pref[1][1] = y_pref
-        print(f"ref is {ref}, ref size is {ref.shape}")
-        print(f"pref is {pref}, pref size is {pref.shape}")
+        pref[0][1] = y_pref
         ref = Raster.to_image(ref, intensities, imgsize, thickness, device=device)        
         pref = Raster.to_image(pref, intensities, imgsize, thickness, device=device)
         pref = Variable(pref)
+        #print(f"ref is {ref}, ref size is {ref.shape}")
+        #print(f"pref is {pref}, pref size is {pref.shape}")
         # perceptual loss
-        loss_fn = lpips.LPIPS(net='vgg')
-        loss_fn.cuda()
-        ref = ref.cuda()
-        pref = pref.cuda()
-        optimizer = torch.optim.Adam([pref,], lr=1e-3, betas=(0.9, 0.999))
-        dist = loss_fn.forward(pref, ref)
-        PL = dist.view(-1).data.cpu().numpy()[0]
+        PL = self.Perceptual_Loss(ref, pref)
         print(f"epoch is {epoch}, perceptual loss: {PL}")
 
         # prepare optimizers:
@@ -330,7 +332,9 @@ class Model:
         # LKL = self.kullback_leibler_loss()
         LR = self.reconstruction_loss(mask, dx, dy, p, epoch)
         # loss = LR + LKL
-        loss = LR
+        # loss = LR + PL
+        loss = LR + PL
+        #model.train(epoch)
         # gradient step
         loss.backward()  # all torch.Tensor has backward.
         # gradient cliping
@@ -368,6 +372,23 @@ class Model:
         # position
         LP = -torch.sum(p * torch.log(1e-3 + self.q)) / float((hp.Nmax + 1) * hp.batch_size)
         return LS + LP
+    
+    def Perceptual_Loss(self, ref, pref):
+        loss_fn = lpips.LPIPS(net='vgg')
+        loss_fn.cuda()
+        ref = ref.cuda()
+        pref = pref.cuda()
+        optimizer = torch.optim.Adam([pref, ], lr=1e-3, betas=(0.9, 0.999))
+        
+        PL_sum = 0
+        range_num = 10
+        for i in range(range_num):
+            dist = loss_fn.forward(pref, ref)
+            optimizer.zero_grad()
+            dist.backward()
+            optimizer.step()
+            PL_sum += dist.view(-1).data.cpu().numpy()[0]
+        return (PL_sum / range_num)
 
     def kullback_leibler_loss(self):
         LKL = -0.5 * torch.sum(1 + self.sigma - self.mu ** 2 - torch.exp(self.sigma)) \
