@@ -2,7 +2,7 @@
 # SketchHealer
 
 -   This is a offical repo for **SketchHealer:** **A** **Graph-to-Sequence** **Network** **for** **Recreating** **Partial** **Human** **Sketches**
--   paper is [here](https://qugank.github.io/papers/SketchHealer.pdf)
+-   paper is [here]( )
 
 -   To run this code, you need to install 
     -   pytorch
